@@ -33,7 +33,7 @@ passport.use(
     {
       clientID: process.env.GITHUB_CLIENT_ID,
       clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: "http://localhost:5000/auth/github/callback",
+      callbackURL: "https://backend-4ave.onrender.com/auth/github/callback",
       scope: ["user", "repo"]
     },
     async (accessToken, refreshToken, profile, done) => {
@@ -81,10 +81,10 @@ app.get(
   "/auth/github/callback",
   passport.authenticate("github", { 
     session: false,
-    failureRedirect: "http://localhost:5173/"
+    failureRedirect: "https://devleaderboard.vercel.app/"
   }),
   (req, res) => {
-    res.redirect(`http://localhost:5173/?username=${req.user.username}`);
+    res.redirect(`https://devleaderboard.vercel.app/?username=${req.user.username}`);
   }
 );
 
@@ -209,4 +209,5 @@ app.get("/api/debug/user/:username", async (req, res) => {
   }
 });
 
-app.listen(5000, () => console.log("✅ Backend running on port 5000"));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
