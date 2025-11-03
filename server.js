@@ -12,22 +12,33 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ✅ Fixed Firebase service account
-let serviceAccount;
+// ✅ Improved Firebase initialization with better error handling
+let firebaseApp;
+let db;
+
 try {
-  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  console.log("Initializing Firebase...");
+  
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  
+  // Fix newlines in private key for production
+  if (serviceAccount.private_key) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+  }
+  
+  firebaseApp = initializeApp({
+    credential: cert(serviceAccount),
+  });
+  
+  db = getFirestore();
+  console.log("✅ Firebase initialized successfully");
 } catch (error) {
-  console.error("❌ Error parsing FIREBASE_SERVICE_ACCOUNT:", error.message);
+  console.error("❌ Firebase initialization failed:", error.message);
+  console.error("Please check your FIREBASE_SERVICE_ACCOUNT environment variable");
   process.exit(1);
 }
 
-// ✅ Initialize Firebase
-initializeApp({
-  credential: cert(serviceAccount),
-});
-const db = getFirestore();
-
-// 🔐 Fixed GitHub OAuth setup
+// 🔐 GitHub OAuth setup
 passport.use(
   new GitHubStrategy(
     {
@@ -38,7 +49,10 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        // ✅ FIX: Use username as document ID for consistency
+        if (!db) {
+          throw new Error("Firestore not initialized");
+        }
+
         const userRef = db.collection("users").doc(profile.username);
         const userDoc = await userRef.get();
 
@@ -49,7 +63,6 @@ passport.use(
           avatar_url: profile._json.avatar_url,
           accessToken: accessToken,
           lastLogin: new Date().toISOString(),
-          // Initialize points if new user
           points: 0,
           repoCount: 0,
           commitCount: 0,
@@ -59,13 +72,12 @@ passport.use(
         if (!userDoc.exists) {
           await userRef.set(userData);
         } else {
-          // ✅ Merge data to preserve existing points
           await userRef.set(userData, { merge: true });
         }
 
         done(null, userData);
       } catch (error) {
-        console.error("❌ Error in GitHub strategy:", error);
+        console.error("❌ Error in GitHub strategy:", error.message);
         done(error, null);
       }
     }
@@ -73,6 +85,15 @@ passport.use(
 );
 
 app.use(passport.initialize());
+
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ 
+    status: "OK", 
+    message: "Developer Leaderboard API is running",
+    timestamp: new Date().toISOString()
+  });
+});
 
 // 🔑 Auth routes
 app.get("/auth/github", passport.authenticate("github"));
@@ -91,6 +112,10 @@ app.get(
 // ⚙️ Fetch GitHub data & calculate points
 app.get("/api/points/:username", async (req, res) => {
   try {
+    if (!db) {
+      return res.status(500).json({ error: "Database not initialized" });
+    }
+
     const { username } = req.params;
     const [repos, events] = await Promise.all([
       axios.get(`https://api.github.com/users/${username}/repos`),
@@ -101,7 +126,6 @@ app.get("/api/points/:username", async (req, res) => {
     const commitCount = events.data.filter((e) => e.type === "PushEvent").length;
     const points = repoCount * 5 + commitCount * 2;
 
-    // ✅ FIX: Update user data without overwriting
     await db.collection("users").doc(username).set(
       { 
         repoCount, 
@@ -122,6 +146,10 @@ app.get("/api/points/:username", async (req, res) => {
 // 🔓 DAILY CHECK-IN ENDPOINT
 app.post("/api/checkin/:username", async (req, res) => {
   try {
+    if (!db) {
+      return res.status(500).json({ error: "Database not initialized" });
+    }
+
     const { username } = req.params;
     const userRef = db.collection("users").doc(username);
     const userDoc = await userRef.get();
@@ -156,9 +184,13 @@ app.post("/api/checkin/:username", async (req, res) => {
   }
 });
 
-// 🏆 Leaderboard endpoint - SIMPLIFIED (no composite index needed)
+// 🏆 Leaderboard endpoint
 app.get("/api/leaderboard", async (req, res) => {
   try {
+    if (!db) {
+      return res.status(500).json({ error: "Database not initialized" });
+    }
+
     const snapshot = await db.collection("users")
       .orderBy("points", "desc")
       .get();
@@ -186,28 +218,33 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
-// 🔍 Debug endpoint to check user data
-app.get("/api/debug/user/:username", async (req, res) => {
+// Debug endpoint to check Firebase connection
+app.get("/api/debug/firebase", async (req, res) => {
   try {
-    const { username } = req.params;
-    const userDoc = await db.collection("users").doc(username).get();
-    
-    if (userDoc.exists) {
-      res.json({ 
-        exists: true, 
-        data: userDoc.data() 
-      });
-    } else {
-      res.json({ 
-        exists: false, 
-        message: "User not found in database" 
-      });
+    if (!db) {
+      return res.json({ status: "error", message: "Firestore not initialized" });
     }
+    
+    // Test a simple query
+    const testRef = db.collection("test");
+    await testRef.add({ test: true, timestamp: new Date().toISOString() });
+    
+    res.json({ 
+      status: "success", 
+      message: "Firebase connection is working",
+      timestamp: new Date().toISOString()
+    });
   } catch (error) {
-    console.error("❌ Debug error:", error.message);
-    res.status(500).json({ error: error.message });
+    res.json({ 
+      status: "error", 
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
   }
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`✅ Backend running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on port ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
