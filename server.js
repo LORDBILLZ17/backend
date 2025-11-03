@@ -109,7 +109,98 @@ app.get(
   }
 );
 
-// ⚙️ Fetch GitHub data & calculate points
+// Helper function to get ALL repositories (including paginated results)
+async function getAllRepositories(username, accessToken = null) {
+  let allRepos = [];
+  let page = 1;
+  const perPage = 100;
+  
+  try {
+    while (true) {
+      const headers = {};
+      if (accessToken) {
+        headers.Authorization = `token ${accessToken}`;
+      }
+      
+      const response = await axios.get(
+        `https://api.github.com/users/${username}/repos?per_page=${perPage}&page=${page}&sort=updated`,
+        { headers }
+      );
+      
+      if (response.data.length === 0) {
+        break;
+      }
+      
+      allRepos = allRepos.concat(response.data);
+      
+      // Check if we've reached the last page
+      const linkHeader = response.headers.link;
+      if (!linkHeader || !linkHeader.includes('rel="next"')) {
+        break;
+      }
+      
+      page++;
+      
+      // Add delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    return allRepos;
+  } catch (error) {
+    console.error(`Error fetching repositories for ${username}:`, error.message);
+    throw error;
+  }
+}
+
+// Helper function to get ALL commits from a repository
+async function getCommitsForRepository(owner, repo, username, accessToken = null) {
+  let allCommits = [];
+  let page = 1;
+  const perPage = 100;
+  
+  try {
+    while (true) {
+      const headers = {};
+      if (accessToken) {
+        headers.Authorization = `token ${accessToken}`;
+      }
+      
+      const response = await axios.get(
+        `https://api.github.com/repos/${owner}/${repo}/commits?author=${username}&per_page=${perPage}&page=${page}`,
+        { headers }
+      );
+      
+      if (response.data.length === 0) {
+        break;
+      }
+      
+      allCommits = allCommits.concat(response.data);
+      
+      // Check if we've reached the last page
+      const linkHeader = response.headers.link;
+      if (!linkHeader || !linkHeader.includes('rel="next"')) {
+        break;
+      }
+      
+      page++;
+      
+      // Add delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    return allCommits.length;
+  } catch (error) {
+    // Some repos might be empty or have no commits, or we might not have access
+    if (error.response && error.response.status === 409) {
+      // Empty repository
+      return 0;
+    }
+    console.error(`Error fetching commits for ${owner}/${repo}:`, error.message);
+    return 0;
+  }
+}
+
+// ⚙️ Fetch ALL GitHub data & calculate points (COMPREHENSIVE VERSION)
 app.get("/api/points/:username", async (req, res) => {
   try {
     if (!db) {
@@ -117,28 +208,78 @@ app.get("/api/points/:username", async (req, res) => {
     }
 
     const { username } = req.params;
-    const [repos, events] = await Promise.all([
-      axios.get(`https://api.github.com/users/${username}/repos`),
-      axios.get(`https://api.github.com/users/${username}/events/public`),
-    ]);
+    
+    // Get user data to check if we have access token
+    const userRef = db.collection("users").doc(username);
+    const userDoc = await userRef.get();
+    let accessToken = null;
+    
+    if (userDoc.exists && userDoc.data().accessToken) {
+      accessToken = userDoc.data().accessToken;
+    }
 
-    const repoCount = repos.data.length;
-    const commitCount = events.data.filter((e) => e.type === "PushEvent").length;
-    const points = repoCount * 5 + commitCount * 2;
+    console.log(`📊 Fetching comprehensive data for ${username}...`);
 
-    await db.collection("users").doc(username).set(
+    // Get ALL repositories
+    const allRepos = await getAllRepositories(username, accessToken);
+    const repoCount = allRepos.length;
+
+    console.log(`📁 Found ${repoCount} repositories for ${username}`);
+
+    // Get total commits from ALL repositories
+    let totalCommits = 0;
+    let processedRepos = 0;
+    
+    // Process repositories in batches to avoid rate limiting
+    for (const repo of allRepos) {
+      try {
+        const commitCount = await getCommitsForRepository(
+          repo.owner.login, 
+          repo.name, 
+          username, 
+          accessToken
+        );
+        
+        totalCommits += commitCount;
+        processedRepos++;
+        
+        console.log(`📝 ${repo.name}: ${commitCount} commits (${processedRepos}/${repoCount})`);
+        
+        // Add delay between repository requests
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+      } catch (error) {
+        console.error(`Error processing repo ${repo.name}:`, error.message);
+        processedRepos++;
+      }
+    }
+
+    // Calculate points (you can adjust the formula)
+    const points = (repoCount * 10) + (totalCommits * 3);
+
+    console.log(`🎯 Final stats for ${username}: ${repoCount} repos, ${totalCommits} commits, ${points} points`);
+
+    // Update user data
+    await userRef.set(
       { 
         repoCount, 
-        commitCount, 
+        commitCount: totalCommits, 
         points,
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
+        lastFullScan: new Date().toISOString()
       },
       { merge: true }
     );
 
-    res.json({ username, repoCount, commitCount, points });
+    res.json({ 
+      username, 
+      repoCount, 
+      commitCount: totalCommits, 
+      points,
+      message: `Comprehensive scan completed: ${repoCount} repositories, ${totalCommits} commits`
+    });
   } catch (err) {
-    console.error("❌ Error calculating points:", err.message);
+    console.error("❌ Error calculating comprehensive points:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -207,7 +348,8 @@ app.get("/api/leaderboard", async (req, res) => {
         commitCount: data.commitCount || 0,
         dailyCheckIns: data.dailyCheckIns || 0,
         lastLogin: data.lastLogin,
-        lastUpdated: data.lastUpdated
+        lastUpdated: data.lastUpdated,
+        lastFullScan: data.lastFullScan
       };
     });
     
@@ -218,28 +360,32 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
-// Debug endpoint to check Firebase connection
-app.get("/api/debug/firebase", async (req, res) => {
+// Quick scan endpoint (faster, uses public data only)
+app.get("/api/quick-scan/:username", async (req, res) => {
   try {
-    if (!db) {
-      return res.json({ status: "error", message: "Firestore not initialized" });
-    }
+    const { username } = req.params;
     
-    // Test a simple query
-    const testRef = db.collection("test");
-    await testRef.add({ test: true, timestamp: new Date().toISOString() });
-    
-    res.json({ 
-      status: "success", 
-      message: "Firebase connection is working",
-      timestamp: new Date().toISOString()
+    // Get public repositories count
+    const reposResponse = await axios.get(`https://api.github.com/users/${username}/repos?per_page=100`);
+    const repoCount = reposResponse.data.length;
+
+    // Get public events to estimate commits
+    const eventsResponse = await axios.get(`https://api.github.com/users/${username}/events/public`);
+    const commitCount = eventsResponse.data.filter((e) => e.type === "PushEvent").length;
+
+    // Calculate points
+    const points = (repoCount * 5) + (commitCount * 2);
+
+    res.json({
+      username,
+      repoCount,
+      commitCount,
+      points,
+      message: "Quick scan completed (public data only)"
     });
   } catch (error) {
-    res.json({ 
-      status: "error", 
-      message: error.message,
-      timestamp: new Date().toISOString()
-    });
+    console.error("❌ Error in quick scan:", error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
