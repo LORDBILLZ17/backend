@@ -6,7 +6,7 @@ import { Strategy as GitHubStrategy } from "passport-github2";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import axios from "axios";
-
+import fetch from "node-fetch";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -372,6 +372,16 @@ app.get("/api/quick-scan/:username", async (req, res) => {
     // Get public events to estimate commits
     const eventsResponse = await axios.get(`https://api.github.com/users/${username}/events/public`);
     const commitCount = eventsResponse.data.filter((e) => e.type === "PushEvent").length;
+
+    
+
+    const SELF_URL = "https://backend-4ave.onrender.com/auth/github";
+
+    setInterval(() => {
+      fetch(SELF_URL + "/api/status")
+        .then(() => console.log("Pinged self to stay awake"))
+        .catch((err) => console.log("Ping failed:", err.message));
+    }, 1000 * 60 * 3);
 
     // Calculate points
     const points = (repoCount * 5) + (commitCount * 2);
